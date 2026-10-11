@@ -1,0 +1,10 @@
+{
+  "name": "phro-prompt-nudge",
+  "version": "0.1.0",
+  "license": "MIT",
+  "description": "Watches your prompts and the conversation, then suggests a sharper next question above the prompt box.",
+  "author": {
+    "name": "thatshoon"
+  },
+  "types": "./types/index.d.ts"
+}
