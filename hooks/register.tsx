@@ -1,12 +1,19 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Nudge } from '../types'
+import type { Line, Nudge } from '../types'
 
 const nudge = atom({ plugin: 'phro-prompt-nudge', key: 'nudge' } as const, null)
 const isOff = atom({ plugin: 'phro-prompt-nudge', key: 'isOff' } as const, false)
+// Recorded from prompt.submit and turn.complete, never read back from the transcript:
+// the transcript's user rows also hold skill bodies, system reminders and command
+// caveats other tools inject, which would reach Haiku as if the person wrote them.
+const history = atom({ plugin: 'phro-prompt-nudge', key: 'history' } as const, [])
 
-// ponytail: last 8 messages, 600 chars each — enough context for a nudge, cheap for haiku
+// Origins where a person typed the prompt; deliveries, notifications and plugins are not theirs.
+const HUMAN_ORIGINS = new Set(['composer', 'bridge', 'sdk'])
+
+// ponytail: last 8 lines, 600 chars each — enough context for a nudge, cheap for haiku
 const RECENT = 8
 const CLIP = 600
 
@@ -29,13 +36,21 @@ export function parseNudge(text: string): Nudge | null {
   }
 }
 
+/** The person's own words: tag-wrapped blocks a host or tool spliced in are dropped. */
+export function typedText(text: string): string {
+  return text
+    .replace(/<([a-z][\w-]*)>[\s\S]*?<\/\1>/g, '')
+    .trim()
+}
+
+export function record(list: readonly Line[], line: Line): Line[] {
+  return [...list, { role: line.role, text: line.text.slice(0, CLIP) }].slice(-RECENT)
+}
+
 async function analyze($: EngineInterface) {
-  const messages = (await $.session.messages()).filter(m => m.text)
-  const transcript = messages
-    .slice(-RECENT)
-    .map(m => `${m.role.toUpperCase()}: ${m.text.slice(0, CLIP)}`)
-    .join('\n\n')
-  if (!transcript) return
+  const lines = await read($, history)
+  if (!lines.some(l => l.role === 'user')) return
+  const transcript = lines.map(l => `${l.role.toUpperCase()}: ${l.text}`).join('\n\n')
 
   const r = await $.model.complete({
     model: 'haiku',
@@ -66,13 +81,21 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     await update($, nudge, () => null)
+    const text = typedText(e.text)
+    if (HUMAN_ORIGINS.has(e.origin.kind) && text && !text.startsWith('/')) {
+      await update($, history, list => record(list, { role: 'user', text }))
+    }
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     const isMainAnswer = e.agentId === undefined && e.reason === 'answer'
-    if (isMainAnswer && !(await read($, isOff))) {
+    if (!isMainAnswer) return result
+    if (e.answer) {
+      await update($, history, list => record(list, { role: 'assistant', text: e.answer }))
+    }
+    if (!(await read($, isOff))) {
       $.clock.after(0, () => void analyze($))
     }
     return result
